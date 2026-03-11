@@ -33,6 +33,7 @@ results/*.json
 results/*.png
 results/*.zip
 results/*.xlsx
+results/summary_*/
 
 # OS files
 .DS_Store
