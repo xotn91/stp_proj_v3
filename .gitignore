@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Environments and editor files
+.venv/
+venv/
+.env
+.vscode/
+.idea/
+
+# Large datasets and generated feature stores
+features_store/
+blast_work/
+TEMP/
+
+# Root-level large data artifacts
+*.parquet
+*.memmap
+*.log
+nohup.out
+results.zip
+heavy_atoms_distribution.png
+target_homology_map.json
+chembl36_stp_training_set_*.csv
+chembl36_stp_training_set_*.parquet
+
+# Results: keep markdown summaries, ignore generated artifacts
+results/*.csv
+results/*.json
+results/*.png
+results/*.zip
+results/*.xlsx
+
+# OS files
+.DS_Store
+Thumbs.db

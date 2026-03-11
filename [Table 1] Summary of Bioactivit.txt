@@ -1,0 +1,23 @@
+=== [Table 1] Summary of Bioactivity Data (cf. NAR 2019 Table 1) ===
+          Species  Number of targets  Number of active compounds  Number of interactions
+     Homo sapiens               4524                      839015                 1247731
+Rattus norvegicus                699                       68271                   88225
+     Mus musculus                692                       25975                   31272
+      All (Total)               5915                      894272                 1367228
+
+=== Generating Figure (cf. Bioinformatics 2013 Fig 5A) ===
+  ✅ Saved plot as 'heavy_atoms_distribution.png'
+
+=== Publication Year Distribution (For Temporal Validation) ===
+publication_year
+2015.0     80230
+2016.0     91385
+2017.0    115097
+2018.0     89266
+2019.0    103073
+2020.0     89733
+2021.0     91283
+2022.0     84048
+2023.0     51623
+2024.0     23442
+Name: count, dtype: int64
