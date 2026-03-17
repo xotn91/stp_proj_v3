@@ -101,7 +101,8 @@ class STPUltraFastTrainer:
                  stp_mode_2014=False, cv_scheme="preassigned",
                  single_modal_eval="both", model_family="stack_hgb",
                  hgb_max_iter=300, hgb_learning_rate=0.05, hgb_max_leaf_nodes=31,
-                 min_neg_per_pair=7, max_neg_per_pair=10, show_progress=True):
+                 min_neg_per_pair=7, max_neg_per_pair=10, show_progress=True,
+                 feature_cache_dir=None, feature_cache_signature=None):
         self.meta_file = meta_file
         self.fp2_path = fp2_memmap
         self.es5d_path = es5d_memmap
@@ -135,12 +136,80 @@ class STPUltraFastTrainer:
         self.min_neg_per_pair = int(min_neg_per_pair)
         self.max_neg_per_pair = int(max_neg_per_pair)
         self.show_progress = bool(show_progress)
+        self.feature_cache_dir = feature_cache_dir
+        self.feature_cache_signature = feature_cache_signature
         
         self.BATCH_SIZE = int(batch_size)
         # [핵심] 쿼리(B)를 자르는 청크 사이즈 (L2 캐시 최적화 사이즈)
         self.CHUNK_3D_B = int(chunk_3d_b)
         
         self._initialize_gpu_engine()
+
+    @staticmethod
+    def _feature_columns_for_k(k_mode):
+        cols = []
+        for i in range(1, int(k_mode) + 1):
+            cols.extend([f"s1_3d_{i}", f"s2_2d_{i}"])
+        return cols
+
+    def _slice_feature_df_for_k(self, df, k_mode):
+        base_cols = ["heavy_atoms", "ha_bin", "label", "cv_fold", "pair_id"]
+        feature_cols = self._feature_columns_for_k(k_mode)
+        missing = [c for c in base_cols + feature_cols if c not in df.columns]
+        if missing:
+            raise KeyError(f"Cached feature matrix missing required columns: {missing}")
+        return df.loc[:, base_cols + feature_cols].copy()
+
+    def _feature_cache_subdir(self):
+        if not self.feature_cache_dir or not self.feature_cache_signature:
+            return None
+        return os.path.join(self.feature_cache_dir, self.feature_cache_signature)
+
+    def _cache_file_path(self, split_name, k_mode):
+        cache_root = self._feature_cache_subdir()
+        if cache_root is None:
+            return None
+        return os.path.join(cache_root, f"{split_name}_features_K{k_mode}.parquet")
+
+    def _try_load_feature_cache(self, split_name):
+        cache_root = self._feature_cache_subdir()
+        if cache_root is None or not os.path.isdir(cache_root):
+            return None
+
+        available = []
+        for name in os.listdir(cache_root):
+            if not name.startswith(f"{split_name}_features_K") or not name.endswith(".parquet"):
+                continue
+            k_str = name[len(f"{split_name}_features_K"):-len(".parquet")]
+            if k_str.isdigit():
+                available.append(int(k_str))
+        viable = sorted(k for k in available if k >= self.K)
+        if not viable:
+            return None
+
+        cache_k = viable[0]
+        cache_path = self._cache_file_path(split_name, cache_k)
+        print(f"   - Reusing cached feature matrix [{split_name}] from: {cache_path}")
+        cached_df = pd.read_parquet(cache_path)
+        if cache_k != self.K:
+            print(f"   - Cached K={cache_k} -> slicing to requested K={self.K}")
+        return self._slice_feature_df_for_k(cached_df, self.K)
+
+    def _save_feature_cache(self, split_name, df):
+        cache_path = self._cache_file_path(split_name, self.K)
+        if cache_path is None:
+            return
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        df.to_parquet(cache_path, index=False)
+        print(f"   - Saved feature matrix cache [{split_name}] to: {cache_path}")
+
+    def _load_or_build_dataset(self, df, desc, split_name):
+        cached = self._try_load_feature_cache(split_name)
+        if cached is not None:
+            return cached
+        built = self._build_dataset_batched(df, desc)
+        self._save_feature_cache(split_name, built)
+        return built
 
     @staticmethod
     def _compose_eval_mode(scaffold_mask, assay_mask):
@@ -548,7 +617,7 @@ class STPUltraFastTrainer:
             min_neg_per_pair=self.min_neg_per_pair,
             max_neg_per_pair=self.max_neg_per_pair,
         )
-        self.train_df = self._build_dataset_batched(self.meta_df, "Past Training Data")
+        self.train_df = self._load_or_build_dataset(self.meta_df, "Past Training Data", "train")
         fold_stats_df = self._compute_fold_stats(self.train_df)
         fold_stats_df["cv_scheme"] = self.cv_scheme
         print("\n>> CV fold class distribution")
@@ -699,7 +768,7 @@ class STPUltraFastTrainer:
                 min_neg_per_pair=self.min_neg_per_pair,
                 max_neg_per_pair=self.max_neg_per_pair,
             )
-            self.future_features_df = self._build_dataset_batched(self.future_df, "Future OOT")
+            self.future_features_df = self._load_or_build_dataset(self.future_df, "Future OOT", "future")
             print("\n>> 4. Evaluating Out-Of-Time (OOT) Performance...")
             
             oot_reports = []
@@ -804,6 +873,11 @@ if __name__ == "__main__":
     parser.add_argument("--min_neg_per_pair", type=int, default=7)
     parser.add_argument("--max_neg_per_pair", type=int, default=10)
     parser.add_argument(
+        "--feature_cache_dir",
+        default=None,
+        help="Optional directory for reusing feature matrices across K-only reruns.",
+    )
+    parser.add_argument(
         "--no_progress",
         action="store_true",
         help="Disable tqdm progress output. Use this for nohup/background runs.",
@@ -860,6 +934,31 @@ if __name__ == "__main__":
         "c_reg": args.c_reg,
         "cutoff_year": args.cutoff_year,
     }
+    feature_cache_cfg = {
+        "script_stem": script_stem,
+        "meta_file": os.path.abspath(args.meta_file),
+        "fp2_memmap": os.path.abspath(args.fp2_memmap),
+        "es5d_memmap": os.path.abspath(es5d_path),
+        "k_policy": args.k_policy,
+        "scaffold_mask": scaffold_mask,
+        "assay_mask": assay_mask,
+        "batch_size": args.batch_size,
+        "chunk_3d_b": args.chunk_3d_b,
+        "thr_preset": args.thr_preset,
+        "thr2d_final": final_thr2d,
+        "thr3d_final": final_thr3d,
+        "disable_threshold_norm": args.disable_threshold_norm,
+        "exclude_below_threshold": args.exclude_below_threshold,
+        "stp_mode_2014": args.stp_mode_2014,
+        "cv_scheme": args.cv_scheme,
+        "min_neg_per_pair": args.min_neg_per_pair,
+        "max_neg_per_pair": args.max_neg_per_pair,
+        "keep_negative_features": args.keep_negative_features,
+        "cutoff_year": args.cutoff_year,
+    }
+    feature_cache_signature = hashlib.sha1(
+        json.dumps(feature_cache_cfg, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()[:12]
     run_hash = hashlib.sha1(
         json.dumps(run_cfg_for_hash, sort_keys=True, ensure_ascii=True).encode("utf-8")
     ).hexdigest()[:10]
@@ -904,6 +1003,8 @@ if __name__ == "__main__":
         log_f.write(f"min_neg_per_pair={args.min_neg_per_pair}\n")
         log_f.write(f"max_neg_per_pair={args.max_neg_per_pair}\n")
         log_f.write(f"show_progress={not args.no_progress}\n")
+        log_f.write(f"feature_cache_dir={args.feature_cache_dir}\n")
+        log_f.write(f"feature_cache_signature={feature_cache_signature}\n")
         log_f.write(f"keep_negative_features={args.keep_negative_features}\n")
         log_f.write(f"c_reg={args.c_reg}\n")
         log_f.write("class_weight=balanced\n")
@@ -950,6 +1051,8 @@ if __name__ == "__main__":
             min_neg_per_pair=args.min_neg_per_pair,
             max_neg_per_pair=args.max_neg_per_pair,
             show_progress=(not args.no_progress),
+            feature_cache_dir=args.feature_cache_dir,
+            feature_cache_signature=feature_cache_signature,
         )
         trainer.execute_cv_and_oot_evaluation()
         with open(run_log_path, "a", encoding="utf-8") as log_f:

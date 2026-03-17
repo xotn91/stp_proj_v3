@@ -15,6 +15,7 @@ venv/
 features_store/
 blast_work/
 TEMP/
+data/
 
 # Root-level large data artifacts
 *.parquet
@@ -34,6 +35,12 @@ results/*.png
 results/*.zip
 results/*.xlsx
 results/summary_*/
+results/cv_predictions_review/
+results/p4_*/
+results/p4_coef_compare_*/
+
+# Generated archives
+script/*.zip
 
 # OS files
 .DS_Store
